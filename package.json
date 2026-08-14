@@ -1,6 +1,6 @@
 {
   "name": "applied-ai-erp-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "check": "tsc --noEmit && npm test"
   },
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "express": "^5.1.0",
     "zod": "^4.0.0"
