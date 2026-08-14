@@ -2,122 +2,220 @@
 
 ![CI](https://github.com/mrcodeislife718/applied-ai-erp-agent/actions/workflows/ci.yml/badge.svg)
 
-A focused engineering demonstration of an AI-first manufacturing ERP experience: intent routing, grounded retrieval, scoped typed MCP tools, authority checks, post-action state verification, fault handling, typed UI responses, audit traces, and evals.
+A production-minded engineering showcase for AI-first ERP: grounded agent workflows, scoped typed MCP tools, role-based authority, explicit approvals, idempotent writes, optimistic concurrency, independent verification, fault handling, typed UI responses, model-boundary validation, and tamper-evident audit evidence.
 
-> This project uses synthetic ERP data. It is a targeted engineering proof, not a claim of production customer traffic.
+> This project uses synthetic ERP data. It is an engineering proof, not a claim of production customer traffic.
 
-## Showcase scenario
+## Showcase workflows
+
+### Inventory shortage
 
 > We may be 300 units short on sales order SO-1842. Find out why and tell me what we can do without delaying the customer.
 
-The system resolves the request, grounds itself in ERP state, narrows the available capability surface, proposes a cross-warehouse transfer, blocks execution without approval, and verifies both the created transfer record and the resulting inventory deltas after an approved write.
+The agent resolves intent, reads the real synthetic ERP state, scopes its capability surface, finds alternate inventory and incoming supply, proposes a transfer, blocks execution without explicit approval and an authorized operator, executes idempotently, and verifies the resulting inventory delta.
+
+### Manufacturing
+
+> Show me the current production status for manufacturing order MO-92.
+
+The agent grounds itself in the manufacturing order and related supply context, then returns a constrained `ProductionStatus` component rather than arbitrary generated UI.
+
+### Financial approval
+
+> Review and approve invoice INV-300.
+
+The invoice can be read by any authenticated session, but the approval write requires both explicit approval and the `finance-approver` role. The write is idempotent, version-checked, recorded with actor identity, and verified after mutation.
 
 ## Architecture
 
 ```text
 User request
+  -> signed session identity
   -> intent / validated model decision
-  -> grounded ERP context
-  -> capability scope
+  -> domain capability scope
+  -> grounded ERP state
   -> typed MCP tools
-  -> retry budget + fault boundary
-  -> authority gate
-  -> ERP state mutation (when approved)
-  -> independent state-delta verification
-  -> typed UI response
-  -> request trace + append-only audit evidence
+  -> bounded retry + fault boundary
+  -> deterministic authorization policy
+  -> explicit approval gate
+  -> idempotency + optimistic concurrency
+  -> ERP state mutation
+  -> independent post-action verification
+  -> typed AI-native UI
+  -> request trace
+  -> SHA-256 chained audit evidence
 ```
 
-## Run
+The core design principle is deliberate: probabilistic model reasoning may interpret intent, but it does not own authorization, business-state mutation, verification, concurrency control, or audit truth.
+
+## Run locally
 
 Requires Node 22+.
 
 ```bash
 npm install
+npm run check
 npm run dev
 ```
 
 Open `http://localhost:3000`.
 
-Run typechecking plus the deterministic eval suite:
+The browser demo can mint short-lived signed demo sessions for four roles:
 
-```bash
-npm run check
-```
+- `viewer`
+- `planner`
+- `operator`
+- `finance-approver`
 
-Run the MCP server locally over stdio:
+Set `DEMO_MODE=false` to disable demo-session issuance outside a showcase environment. Set `SESSION_SECRET` in deployed environments so sessions remain verifiable across instances.
+
+## MCP
+
+Run the local stdio server:
 
 ```bash
 npm run mcp
 ```
 
-The web server also exposes the same MCP capability remotely at `POST/GET/DELETE /mcp` through the SDK's Streamable HTTP handler.
+The Express application also exposes authenticated remote MCP at `/mcp`. Remote MCP receives the same signed principal context as the HTTP API; MCP write tools do not get a privileged bypass.
 
-## MCP tools
+Typed tools:
 
-- `get-order` — grounded sales-order lookup
-- `get-inventory` — SKU inventory by warehouse
-- `get-supply-options` — confirmed purchase orders, scheduled production, and alternate inventory
-- `propose-transfer` — non-mutating transfer proposal with inventory validation
-- `execute-transfer` — approval-gated ERP state mutation
+- `get-order`
+- `get-inventory`
+- `get-supply-options`
+- `get-production-order`
+- `get-invoice`
+- `propose-transfer`
+- `execute-transfer`
+- `approve-invoice`
 
-## Reliability and safe failure
+## Safety and correctness layers
 
-The orchestration layer has deterministic fault injection for timeouts, unavailable tools, and malformed tool results. Retryable read/tool failures use a bounded retry budget. When required state still cannot be obtained, the agent fails closed: it marks the run degraded, blocks writes, emits a `SystemNotice`, and refuses to invent substitute ERP state.
+### Grounding
 
-A model-provider abstraction validates structured model decisions with Zod before they can influence tool selection. Invalid model output is stopped before ERP tools or writes execute.
+Missing orders, manufacturing records, invoices, or required inventory state cause the workflow to stop. The agent does not fabricate substitute ERP state.
 
-## Typed UI surface
+### Capability scoping
 
-The agent returns constrained component descriptors instead of arbitrary generated markup:
+Each domain receives a narrow tool surface. Inventory/order workflows do not automatically expose financial approval capabilities, and financial workflows do not receive unrelated inventory writes.
+
+### Authorization
+
+Consequential actions are checked outside the prompt:
+
+- warehouse transfer execution -> `operator` or `finance-approver`
+- invoice approval -> `finance-approver`
+
+### Explicit approval
+
+Possessing a capable role is not enough. Consequential writes still require an explicit approval signal.
+
+### Idempotency
+
+Write tools require idempotency keys. Replaying the same operation returns the prior result instead of mutating ERP state twice. Reusing the same key for a different operation fails with an idempotency conflict.
+
+### Optimistic concurrency
+
+Inventory and financial records carry versions. Writes can include expected versions and fail safely when the underlying state changed after the agent read it.
+
+### Verification
+
+A successful tool response is not treated as proof by itself. The orchestration layer verifies the resulting state change and emits an `ExecutionReceipt` with verification evidence.
+
+### Fault tolerance
+
+Deterministic fault injection covers:
+
+- timeout
+- unavailable dependency
+- malformed tool output
+
+Retryable failures receive a bounded retry budget. Persistent failures put the run into a degraded, fail-closed state and block writes.
+
+### Model boundary validation
+
+`ModelProvider` outputs are parsed through a strict Zod schema before they can affect orchestration. Malformed model output is stopped before ERP tools execute.
+
+### Tamper-evident audit
+
+Every safety-relevant event is appended to an audit chain containing `previousHash` and a deterministic SHA-256 digest. `verifyAuditChain()` detects mutation or chain breakage.
+
+Set `AUDIT_FILE=/path/to/audit.ndjson` to persist the chain to append-only NDJSON for a long-running deployment. The in-memory store remains available for ephemeral/serverless showcase environments.
+
+## Typed UI vocabulary
+
+The server returns constrained component descriptors instead of arbitrary model-authored markup:
 
 - `OrderSummary`
 - `InventoryAlert`
+- `ProductionStatus`
+- `FinancialApproval`
 - `ActionProposal`
 - `ApprovalRequest`
 - `ExecutionReceipt`
 - `SystemNotice`
 
-That keeps model output inside an auditable interface vocabulary while still allowing the experience to be assembled dynamically.
+This creates an auditable interface vocabulary that both humans and models can compose safely.
 
-## Auditability
+## Evaluation harness
 
-Every run receives a unique request ID. Safety-relevant orchestration events are copied into an append-only audit trail and can be inspected through `GET /api/audit/:requestId`. The browser demo exposes both the execution trace and the audit evidence.
+`npm test` runs a deterministic evaluation suite across normal and adversarial behavior, including:
 
-## Evaluation cases
-
-The harness checks normal operation and negative paths, including:
-
-- domain/intent routing
-- nonexistent-order grounding refusal
-- missing-reference ambiguity handling
-- safe analysis of SO-1842
-- approval blocking before consequential writes
-- direct write-tool rejection without approval
+- intent routing across inventory, manufacturing, and financial domains
+- missing and nonexistent ERP records
+- tool-surface scoping
+- explicit approval enforcement
+- role-based authorization
+- successful transfer mutation and state verification
 - insufficient-inventory rejection
-- execution after explicit approval
-- source and destination inventory mutation
-- post-action state-delta verification
-- capability scoping
-- transient timeout recovery within the retry budget
-- persistent dependency outage -> degraded fail-closed behavior
-- execute-tool outage -> no mutation
-- append-only audit evidence
+- idempotent replay
+- idempotency-key conflict
+- optimistic-concurrency conflict
+- transient timeout recovery
+- persistent dependency outage
+- execute-tool outage with zero mutation
+- malformed tool result fail-closed behavior
+- manufacturing grounding
+- financial approval policy
+- signed-session verification and expiry
+- audit-stage capture
+- audit hash-chain validation
+- NDJSON audit persistence
 - valid structured model decision
-- malformed model decision -> blocked before tool execution
+- malformed model decision blocked before tools
+- unknown-intent refusal
 
-## Verification status
+GitHub Actions runs `npm run check` on Node 22 and Node 24. CI is the source of truth for whether the current commit compiles and passes the full deterministic suite.
 
-GitHub Actions runs `npm run check` on Node 22 and Node 24. CI is the source of truth for whether the current commit compiles and passes the deterministic safety/evaluation suite.
+## HTTP surface
 
-## Why deterministic safety surrounds probabilistic reasoning
+- `GET /healthz`
+- `POST /api/demo/session`
+- `POST /api/agent`
+- `GET /api/audit/:requestId`
+- `GET /api/metrics`
+- `GET /api/state`
+- `GET|POST|DELETE /mcp`
 
-The demo deliberately separates probabilistic model reasoning from deterministic authority, ERP mutation, verification, retry policy, and auditing. An LLM can help interpret intent and choose among allowed capabilities, but it cannot make unsafe writes valid by producing persuasive text.
+The API includes request-body limits, basic per-IP rate limiting, security headers, signed bearer sessions, and a CSP for the browser showcase.
 
-## Next layers
+## Deployment
 
-- durable database-backed audit/event persistence
-- authenticated remote MCP and per-user authorization
-- broader manufacturing and financial workflows
-- larger eval corpus with model-quality scoring
-- hosted demo deployment and recruiter-facing polish
+The Express app is exported as the default module export for modern serverless deployment platforms while still supporting local `app.listen()` development. For durable audit storage in a multi-instance production deployment, replace the optional NDJSON file sink with a transactional database/event store while keeping the same audit-chain contract.
+
+## Interview discussion points
+
+This project is intentionally built to make engineering tradeoffs inspectable. Useful questions to ask or answer from the codebase include:
+
+- Why should a model not see hundreds of ERP tools at once?
+- Why is authentication different from authorization?
+- Why is explicit user approval still needed after authorization succeeds?
+- How do idempotency and optimistic concurrency prevent different classes of duplicate/stale writes?
+- What should happen when retrieval succeeds but a downstream write tool is unavailable?
+- Why verify resulting ERP state instead of trusting a successful tool response?
+- What belongs in deterministic policy versus an LLM prompt?
+- How should an AI-native UI constrain what a model is allowed to render?
+- How do you measure whether an agent is actually improving rather than merely sounding better?
+
+Those are the design problems this repository is meant to demonstrate with runnable evidence rather than claims.
