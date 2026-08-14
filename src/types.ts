@@ -6,12 +6,15 @@ export type UiComponent =
   | { type: 'InventoryAlert'; props: Record<string, unknown> }
   | { type: 'ActionProposal'; props: Record<string, unknown> }
   | { type: 'ApprovalRequest'; props: Record<string, unknown> }
-  | { type: 'ExecutionReceipt'; props: Record<string, unknown> };
+  | { type: 'ExecutionReceipt'; props: Record<string, unknown> }
+  | { type: 'SystemNotice'; props: Record<string, unknown> };
 
 export type AgentResult = {
+  requestId: string;
   answer: string;
   domain: Domain;
   grounded: boolean;
+  degraded: boolean;
   components: UiComponent[];
   trace: TraceEvent[];
 };
