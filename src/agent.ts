@@ -29,7 +29,12 @@ export function runAgent(input: string, opts: { approved?: boolean } = {}): Agen
   trace.push({ stage: 'tool', detail: { name: 'getInventory', result: inventory } });
   trace.push({ stage: 'tool', detail: { name: 'getSupplyOptions', result: supply } });
 
-  const primary = inventory.find(r => r.warehouse === order.warehouse)!;
+  const primary = inventory.find(r => r.warehouse === order.warehouse);
+  if (!primary) {
+    trace.push({ stage: 'grounding', detail: { grounded: false, reason: 'primary_inventory_not_found', warehouse: order.warehouse, sku: order.sku } });
+    return { answer: `I found ${orderId}, but I cannot find inventory state for ${order.sku} at ${order.warehouse}. I will not recommend an action without that state.`, domain, grounded: false, components: [], trace };
+  }
+
   const shortage = Math.max(0, order.quantity - primary.onHand);
   const alternate = inventory.find(r => r.warehouse !== order.warehouse && r.onHand - r.allocated > 0);
   const availableAlternate = alternate ? alternate.onHand - alternate.allocated : 0;
@@ -41,26 +46,37 @@ export function runAgent(input: string, opts: { approved?: boolean } = {}): Agen
     { type: 'InventoryAlert', props: { sku: order.sku, shortage, warehouse: order.warehouse } }
   ];
 
-  const suggestedTransfer = Math.min(shortage, availableAlternate);
+  let suggestedTransfer = Math.min(shortage, availableAlternate);
   if (suggestedTransfer > 0 && alternate) {
     const proposal = tools.proposeTransfer({ sku: order.sku, quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse });
     trace.push({ stage: 'tool', detail: { name: 'proposeTransfer', result: proposal } });
-    components.push({ type: 'ActionProposal', props: { action: 'warehouse_transfer', quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse, requiresApproval: true } });
 
-    if (opts.approved) {
-      const execution = tools.executeTransfer({ sku: order.sku, quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse, approved: true });
-      trace.push({ stage: 'execution', detail: execution });
-      const verified = Boolean(execution.ok && execution.transfer && execution.transfer.status === 'created');
-      trace.push({ stage: 'verification', detail: { verified, transfer: execution.transfer ?? null } });
-      components.push({ type: 'ExecutionReceipt', props: { ...execution, verified } });
+    if (!proposal.ok) {
+      suggestedTransfer = 0;
+      trace.push({ stage: 'safety', detail: { action: 'warehouse_transfer', allowed: false, reason: proposal.reason } });
     } else {
-      trace.push({ stage: 'authority', detail: { action: 'executeTransfer', allowed: false, reason: 'approval_required' } });
-      components.push({ type: 'ApprovalRequest', props: { action: 'warehouse_transfer', quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse } });
+      components.push({ type: 'ActionProposal', props: { action: 'warehouse_transfer', quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse, requiresApproval: true } });
+
+      if (opts.approved) {
+        const execution = tools.executeTransfer({ sku: order.sku, quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse, approved: true });
+        trace.push({ stage: 'execution', detail: execution });
+
+        const deltaVerified = execution.ok
+          && execution.stateChange.before.sourceOnHand - execution.stateChange.after.sourceOnHand === suggestedTransfer
+          && execution.stateChange.after.destinationOnHand - execution.stateChange.before.destinationOnHand === suggestedTransfer;
+        const recordVerified = Boolean(execution.ok && execution.transfer.status === 'created');
+        const verified = Boolean(deltaVerified && recordVerified);
+
+        trace.push({ stage: 'verification', detail: { verified, recordVerified, deltaVerified, transfer: execution.ok ? execution.transfer : null } });
+        components.push({ type: 'ExecutionReceipt', props: { ...execution, verified } });
+      } else {
+        trace.push({ stage: 'authority', detail: { action: 'executeTransfer', allowed: false, reason: 'approval_required' } });
+        components.push({ type: 'ApprovalRequest', props: { action: 'warehouse_transfer', quantity: suggestedTransfer, from: alternate.warehouse, to: order.warehouse } });
+      }
     }
   }
 
   const remaining = Math.max(0, shortage - suggestedTransfer);
-  const coverage = poIncoming + productionIncoming;
   const answer = shortage === 0
     ? `${orderId} is currently covered from ${order.warehouse}.`
     : `${orderId} is short ${shortage} ${order.sku} units at ${order.warehouse}. ${availableAlternate} unallocated units exist at ${alternate?.warehouse ?? 'no alternate warehouse'}, with ${poIncoming} on confirmed purchase orders and ${productionIncoming} scheduled in production. ${suggestedTransfer > 0 ? `A transfer of ${suggestedTransfer} units can reduce the gap` : 'No warehouse transfer is currently available'}${remaining > 0 ? `; ${remaining} units would still need incoming supply or another intervention.` : '.'}`;
